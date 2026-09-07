@@ -1591,9 +1591,10 @@ function render() {
     const rx = interpolate(seg.p1.screen.x, seg.p2.screen.x, pct);
     const ry = interpolate(seg.p1.screen.y, seg.p2.screen.y, pct);
     const rRoadW = interpolate(seg.p1.screen.w, seg.p2.screen.w, pct);
-    // mesma proporção do kart do jogador (W * 0.16 na distância dele), assim
-    // um rival do lado tem o tamanho certo em vez de virar um gigante
-    const w = Math.min(W * 0.6, rRoadW * 0.16);
+    // calibrado contra a largura da pista na profundidade em que o kart do
+    // jogador é desenhado (y = 0.73H). Ali screen.w vale 0.46 * W, então um
+    // rival encostado no jogador tem que dar W * 0.16, o mesmo tamanho dele.
+    const w = Math.min(W * 0.6, rRoadW * (0.16 / 0.46));
     if (w < 1) continue;
     rivaisNaTela.push({ r, n, rx, ry, rRoadW, w, fog: seg.fog });
   }
