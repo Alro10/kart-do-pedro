@@ -1576,17 +1576,32 @@ function render() {
       ctx.globalAlpha = 1;
     }
 
-    // rivais que estão neste segmento
-    for (const r of race.rivals) {
-      const rSeg = findSegment(r.z);
-      if (rSeg.index !== seg.index) continue;
-      const w = Math.min(W * 0.19, roadW * 0.42);
-      const h = w * 0.85;
-      if (w < 1) continue;
-      ctx.globalAlpha = clamp(seg.fog, 0, 1);
-      drawKartSprite(sx + roadW * r.x, sy, w, h, r.color, 0, false, r.kind);
-      ctx.globalAlpha = 1;
-    }
+  }
+
+  // rivais: passada própria, do fundo para a frente, com posição interpolada
+  // dentro do segmento. Se grudam no p1 o kart cresce de degrau em degrau e
+  // fica feio quando está perto.
+  const rivaisNaTela = [];
+  for (const r of race.rivals) {
+    const seg = findSegment(r.z);
+    const n = (seg.index - baseSegment.index + segments.length) % segments.length;
+    if (n >= DRAW_DIST) continue;
+    if (!seg.p1.screen.scale || seg.p1.camera.z <= CAM_DEPTH || seg.p2.camera.z <= CAM_DEPTH) continue;
+    const pct = percentRemaining(r.z, SEG_LEN);
+    const rx = interpolate(seg.p1.screen.x, seg.p2.screen.x, pct);
+    const ry = interpolate(seg.p1.screen.y, seg.p2.screen.y, pct);
+    const rRoadW = interpolate(seg.p1.screen.w, seg.p2.screen.w, pct);
+    // mesma proporção do kart do jogador (W * 0.16 na distância dele), assim
+    // um rival do lado tem o tamanho certo em vez de virar um gigante
+    const w = Math.min(W * 0.6, rRoadW * 0.16);
+    if (w < 1) continue;
+    rivaisNaTela.push({ r, n, rx, ry, rRoadW, w, fog: seg.fog });
+  }
+  rivaisNaTela.sort((a, b) => b.n - a.n);
+  for (const v of rivaisNaTela) {
+    ctx.globalAlpha = clamp(v.fog, 0, 1);
+    drawKartSprite(v.rx + v.rRoadW * v.r.x, v.ry, v.w, v.w * 0.85, v.r.color, 0, false, v.r.kind);
+    ctx.globalAlpha = 1;
   }
 
   // kart do jogador, sempre na frente da câmera
@@ -1845,6 +1860,7 @@ loadRacers().then(() => {
   renderRivalChips();
   resize();
 });
+
 </script>
 </body>
 </html>
