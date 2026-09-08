@@ -370,6 +370,26 @@ const SND = (function () {
       if (!on || !ensure()) return;
       blip('square', high ? 880 : 440, ctx.currentTime, 0.18, 0.3, sfxGain);
     },
+    // poça de barro: um "chuá" grave e curto, nada de castigo sonoro
+    splash: function () {
+      if (!on || !ensure()) return;
+      const t = ctx.currentTime;
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(330, t);
+      o.frequency.exponentialRampToValueAtTime(90, t + 0.22);
+      g.gain.setValueAtTime(0.28, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+      o.connect(g); g.connect(sfxGain);
+      o.start(t); o.stop(t + 0.28);
+    },
+    // pedrinha: toc seco
+    bump: function () {
+      if (!on || !ensure()) return;
+      const t = ctx.currentTime;
+      blip('square', 180, t, 0.07, 0.3, sfxGain);
+      blip('square', 120, t + 0.03, 0.09, 0.22, sfxGain);
+    },
     say: say,
     // só pra depurar do console: estado do relógio de áudio e do volume
     dbg: () => ({ state: ctx && ctx.state, t: ctx && ctx.currentTime,
@@ -808,6 +828,114 @@ function updateCoins(spin) {
   coinMesh.instanceMatrix.needsUpdate = true;
 }
 
+/* --- obstáculos: poças de barro e pedrinhas ---------------------------------
+
+   Regra de projeto, por causa da dispraxia do Pedro: obstáculo NUNCA trava,
+   nunca gira o kart e nunca joga ele pra trás. Só custa velocidade por um
+   instante. Dá o que desviar sem transformar a corrida em castigo.
+
+   - Poça de barro: enquanto o kart está em cima, a velocidade alvo cai.
+     Sai da poça, volta ao normal sozinho.
+   - Pedrinha: uma freada seca de uma vez só, e segue.
+
+   O sorteio usa um gerador com semente fixa, então a pista é SEMPRE a mesma.
+   Isso é de propósito: o Pedro decora onde estão e aprende a desviar. Com
+   posições aleatórias a cada corrida ele nunca ganharia essa leitura.
+--------------------------------------------------------------------------- */
+const MUD_N = 12, ROCK_N = 10;
+const MUD_R = 2.6, ROCK_R = 1.5;
+let obstacles = [], mudMesh = null, rockMesh = null;
+const obsDummy = new THREE.Object3D();
+
+// LCG simples, só pra ter sorteio reproduzível sem depender do Math.random
+function seeded(seed) {
+  let s = seed >>> 0;
+  return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+function buildObstacles() {
+  const rnd = seeded(20260908);
+  obstacles = [];
+  const group = new THREE.Group();
+
+  function place(kind, n, radius) {
+    for (let i = 0; i < n; i++) {
+      // espalha em fatias iguais da volta, pulando a reta da largada
+      const u = 0.10 + ((i + rnd() * 0.6) / n) * 0.86;
+      let lateral = (rnd() * 2 - 1) * (ROAD_W * 0.62);
+      // não deixa obstáculo em cima de moeda: seria pegar e apanhar junto
+      for (let k = 0; k < coins.length; k++) {
+        let du = coins[k].u - u;
+        if (du > 0.5) du -= 1;
+        if (du < -0.5) du += 1;
+        if (Math.abs(du * curveLen) < 6 && Math.abs(coins[k].lateral - lateral) < 4.5) {
+          lateral = -lateral;
+          break;
+        }
+      }
+      const p = curve.getPointAt(u).addScaledVector(sideAt(u), lateral);
+      obstacles.push({ kind: kind, u: u, lateral: lateral, radius: radius,
+                       pos: new THREE.Vector3(p.x, p.y, p.z), rot: rnd() * TAU });
+    }
+  }
+  place('mud', MUD_N, MUD_R);
+  place('rock', ROCK_N, ROCK_R);
+
+  // poça: disco achatado deitado no asfalto. polygonOffset porque já tivemos
+  // z-fighting entre pista e chão aqui, não vamos repetir o vexame.
+  const mudGeo = new THREE.CircleGeometry(MUD_R, 12);
+  mudGeo.rotateX(-Math.PI / 2);
+  const mudMat = new THREE.MeshLambertMaterial({
+    color: 0x4A3524, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+  });
+  mudMesh = new THREE.InstancedMesh(mudGeo, mudMat, MUD_N);
+  mudMesh.frustumCulled = false;
+
+  // pedra grande e clara de propósito: medi na tela e a pedra pequena quase
+  // não aparecia contra o asfalto. Se o Pedro não enxerga de longe, não dá
+  // pra desviar, e aí vira sorte em vez de habilidade.
+  const rockGeo = new THREE.IcosahedronGeometry(ROCK_R * 1.05, 0);
+  const rockMat = new THREE.MeshLambertMaterial({ color: 0xCFC6B8, flatShading: true });
+  rockMesh = new THREE.InstancedMesh(rockGeo, rockMat, ROCK_N);
+  rockMesh.frustumCulled = false;
+
+  let mi = 0, ri = 0;
+  obstacles.forEach((o) => {
+    if (o.kind === 'mud') {
+      obsDummy.position.set(o.pos.x, o.pos.y + 0.09, o.pos.z);
+      obsDummy.rotation.set(0, o.rot, 0);
+      obsDummy.scale.set(1, 1, 0.7);          // poça oval, fica menos de alvo de tiro
+      obsDummy.updateMatrix();
+      mudMesh.setMatrixAt(mi++, obsDummy.matrix);
+    } else {
+      obsDummy.position.set(o.pos.x, o.pos.y + ROCK_R * 0.55, o.pos.z);
+      obsDummy.rotation.set(o.rot, o.rot * 1.7, o.rot * 0.4);
+      obsDummy.scale.set(1, 0.9, 1);
+      obsDummy.updateMatrix();
+      rockMesh.setMatrixAt(ri++, obsDummy.matrix);
+    }
+  });
+  mudMesh.instanceMatrix.needsUpdate = true;
+  rockMesh.instanceMatrix.needsUpdate = true;
+  group.add(mudMesh); group.add(rockMesh);
+  return group;
+}
+
+// devolve 'mud', 'rock' ou null, e guarda qual foi pra não repetir o som
+function obstacleUnder(r) {
+  for (let i = 0; i < obstacles.length; i++) {
+    const o = obstacles[i];
+    let du = o.u - r.u;
+    if (du > 0.5) du -= 1;
+    if (du < -0.5) du += 1;
+    const dz = du * curveLen, dx = o.lateral - r.lateral;
+    if (Math.abs(dz) < o.radius + 1.4 && Math.abs(dx) < o.radius + 1.2) {
+      return { kind: o.kind, index: i };
+    }
+  }
+  return null;
+}
+
 /* --- montagem única da cena --- */
 let playerKart, rivalKarts = [], coinGroup;
 
@@ -872,6 +1000,7 @@ function buildScene() {
   scene.add(scatterDecor());
   coinGroup = buildCoins();
   scene.add(coinGroup);
+  scene.add(buildObstacles());   // depois das moedas: precisa delas pra não sobrepor
 
   playerKart = makeKart(pilot.color);
   playerKart.userData.color = pilot.color;
@@ -906,7 +1035,7 @@ function makeRacer(name, colorHex, mesh, isPlayer, cruise, startLateral) {
     u: 0, lateral: startLateral, speed: 0, cruise: cruise,
     lap: 1, lapTimes: [], bestLap: null, prevU: 0,
     phase: Math.random() * TAU, freq: 2 + Math.random() * 3,
-    heading: 0, finishedAt: null, place: 0,
+    heading: 0, finishedAt: null, place: 0, lastObs: -1,
   };
 }
 
@@ -1013,10 +1142,31 @@ function step(dt) {
       // rubber band suave: nunca deixa a corrida virar passeio nem massacre
       const me = racers[0];
       const gap = (r.lap + r.u) - (me.lap + me.u);
-      target *= 1 - Math.max(-0.10, Math.min(0.10, gap * 1.2));
+      // assimétrico de propósito: ajuda forte quem ficou pra trás (-0.14) e
+      // segura pouco quem está na frente (0.05). Antes segurava igual dos dois
+      // lados e o Pedro ganhava toda corrida sem esforço.
+      target *= 1 - Math.max(-0.14, Math.min(0.05, gap * 1.2));
     }
     const offRoad = Math.abs(r.lateral) > ROAD_W;
     if (offRoad) target *= 0.55;
+
+    // ---- obstáculos: só custam velocidade, nunca travam nem giram ----
+    const hit = obstacleUnder(r);
+    if (hit && hit.kind === 'mud') {
+      target *= 0.58;                       // barro: enquanto estiver em cima
+      if (r.lastObs !== hit.index) {
+        r.lastObs = hit.index;
+        if (r.isPlayer) { SND.splash(); showToast('Barro!'); }
+      }
+    } else if (hit && hit.kind === 'rock') {
+      if (r.lastObs !== hit.index) {        // pedra: uma freada seca, só na entrada
+        r.lastObs = hit.index;
+        r.speed *= 0.72;
+        if (r.isPlayer) { SND.bump(); showToast('Pedra!'); }
+      }
+    } else if (!hit) {
+      r.lastObs = -1;
+    }
     const rate = target > r.speed ? 9 : 16;
     r.speed += (target - r.speed) * Math.min(1, rate * dt);
 
