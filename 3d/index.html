@@ -139,6 +139,7 @@
     </div>
 
     <button class="btn-primary" id="btn-start">Começar a corrida</button>
+    <button class="btn-ghost" id="btn-som">Som: ligado</button>
 
     <div class="label" id="lbl-records">Melhores tempos</div>
     <div class="rows" id="records"></div>
@@ -219,6 +220,171 @@ const TURBO_MUL  = 1.45;
 
 let pilot = PILOTS[0];
 let difficulty = 'devagar';
+
+/* =========================================================================
+   Som: música procedural + voz feminina (pt-BR)
+
+   Tudo é gerado na hora com WebAudio, nenhum arquivo de áudio. O arquivo
+   continua sendo um HTML só, que abre com duplo clique e roda sem internet.
+   A voz usa a síntese de fala do próprio sistema (a Luciana no Mac), que
+   também é offline.
+   ========================================================================= */
+const SND = (function () {
+  const KEY = 'kart3d.som.v1';
+  let on = localStorage.getItem(KEY) !== '0';
+  let ctx = null, master = null, musicGain = null, sfxGain = null;
+  let timer = 0, nextTime = 0, stepIdx = 0, playing = false;
+  let duckUntil = 0;
+
+  // huayno em lá menor pentatônica: melodia de quena, baixo de charango e bombo
+  const A = 220;
+  const SC = [0, 3, 5, 7, 10, 12, 15, 12, 10, 7, 5, 3];      // graus da pentatônica
+  const MEL = [0, 4, 3, 4, 5, 4, 3, 2, 1, 2, 3, 2, 0, 2, 1, 0,
+               3, 4, 5, 6, 5, 4, 3, 2, 3, 2, 1, 2, 0, 1, 2, 0];
+  const BASS = [0, null, 7, null, 5, null, 7, null];
+  const STEP = 0.15;   // duração de uma colcheia, em segundos
+
+  function hz(deg) { return A * Math.pow(2, SC[((deg % SC.length) + SC.length) % SC.length] / 12); }
+
+  function ensure() {
+    if (ctx) return true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    ctx = new AC();
+    master = ctx.createGain();     master.gain.value = 0.9;  master.connect(ctx.destination);
+    musicGain = ctx.createGain();  musicGain.gain.value = 0.0; musicGain.connect(master);
+    sfxGain = ctx.createGain();    sfxGain.gain.value = 0.55;  sfxGain.connect(master);
+    return true;
+  }
+
+  function blip(type, freq, t, dur, vol, dest) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(dest || musicGain);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  function bombo(t) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(120, t);
+    o.frequency.exponentialRampToValueAtTime(48, t + 0.13);
+    g.gain.setValueAtTime(0.6, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    o.connect(g); g.connect(musicGain);
+    o.start(t); o.stop(t + 0.22);
+  }
+
+  // agenda um pouquinho à frente do relógio: se o MacBook engasgar, a música
+  // não gagueja junto com o frame
+  function schedule() {
+    if (!playing) return;
+    while (nextTime < ctx.currentTime + 0.4) {
+      const i = stepIdx;
+      blip('triangle', hz(MEL[i % MEL.length]) * 2, nextTime, STEP * 1.6, 0.18);
+      const b = BASS[i % BASS.length];
+      if (b !== null) blip('square', hz(b) / 2, nextTime, STEP * 1.2, 0.10);
+      if (i % 4 === 0 || i % 8 === 6) bombo(nextTime);
+      nextTime += STEP;
+      stepIdx += 1;
+    }
+    // volta ao volume cheio quando a voz termina de falar
+    if (ctx.currentTime > duckUntil && musicGain.gain.value < 0.28) {
+      musicGain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 0.4);
+    }
+  }
+
+  /* ---- voz ---- */
+  let voice = null, voiceTried = false;
+  function pickVoice() {
+    if (!window.speechSynthesis) return null;
+    const all = speechSynthesis.getVoices() || [];
+    if (!all.length) return null;
+    const pt = all.filter((v) => /^pt/i.test(v.lang));
+    const fem = /luciana|female|feminin|maria|joana|fernanda|ines|inês|catarina|google portug/i;
+    return pt.filter((v) => fem.test(v.name))[0] || pt[0] ||
+           all.filter((v) => fem.test(v.name))[0] || null;
+  }
+  if (window.speechSynthesis) {
+    speechSynthesis.onvoiceschanged = () => { voice = pickVoice(); };
+  }
+
+  function say(text, force) {
+    if (!on || !window.speechSynthesis) return;
+    if (!voice && !voiceTried) { voice = pickVoice(); voiceTried = true; }
+    if (speechSynthesis.speaking && !force) return;   // não atropela a frase anterior
+    if (force) speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    if (voice) u.voice = voice;
+    u.lang = voice ? voice.lang : 'pt-BR';
+    u.rate = 1.0; u.pitch = 1.25; u.volume = 1;
+    if (ctx && playing) {           // abaixa a música enquanto ela fala
+      duckUntil = ctx.currentTime + 2.2;
+      musicGain.gain.linearRampToValueAtTime(0.09, ctx.currentTime + 0.12);
+    }
+    u.onend = () => { if (ctx && playing) duckUntil = ctx.currentTime + 0.1; };
+    speechSynthesis.speak(u);
+  }
+
+  return {
+    isOn: () => on,
+    toggle: function () {
+      on = !on;
+      localStorage.setItem(KEY, on ? '1' : '0');
+      if (!on) { this.stopMusic(); if (window.speechSynthesis) speechSynthesis.cancel(); }
+      return on;
+    },
+    // precisa ser chamado dentro de um clique: navegador não deixa tocar antes
+    unlock: function () {
+      if (!on || !ensure()) return;
+      if (ctx.state === 'suspended') ctx.resume();
+      if (!voice) voice = pickVoice();
+    },
+    startMusic: function () {
+      if (!on || !ensure() || playing) return;
+      if (ctx.state === 'suspended') ctx.resume();
+      playing = true;
+      stepIdx = 0;
+      nextTime = ctx.currentTime + 0.08;
+      musicGain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      musicGain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 1.2);
+      timer = setInterval(schedule, 60);
+    },
+    stopMusic: function () {
+      playing = false;
+      clearInterval(timer); timer = 0;
+      if (ctx) musicGain.gain.linearRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+    },
+    pauseMusic: function () { if (ctx && playing) musicGain.gain.linearRampToValueAtTime(0.02, ctx.currentTime + 0.15); },
+    resumeMusic: function () { if (ctx && playing) musicGain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 0.3); },
+    coin: function () {
+      if (!on || !ensure()) return;
+      const t = ctx.currentTime;
+      blip('sine', 1320, t, 0.09, 0.35, sfxGain);
+      blip('sine', 1980, t + 0.06, 0.11, 0.28, sfxGain);
+    },
+    beep: function (high) {
+      if (!on || !ensure()) return;
+      blip('square', high ? 880 : 440, ctx.currentTime, 0.18, 0.3, sfxGain);
+    },
+    say: say,
+    // só pra depurar do console: estado do relógio de áudio e do volume
+    dbg: () => ({ state: ctx && ctx.state, t: ctx && ctx.currentTime,
+                  playing: playing, gain: musicGain && musicGain.gain.value, voice: voice && voice.name }),
+  };
+})();
+
+// alguns navegadores só liberam o áudio num toque de verdade, então qualquer
+// toque ou tecla na página serve de destrava
+['pointerdown', 'keydown', 'touchstart'].forEach((ev) => {
+  document.addEventListener(ev, () => SND.unlock(), { passive: true });
+});
+
+// números redondos por extenso, que é como a voz tem que dizer as moedas
+const DEZENAS = { 10: 'dez', 20: 'vinte', 30: 'trinta', 40: 'quarenta', 50: 'cinquenta' };
 
 /* =========================================================================
    Menu
@@ -727,6 +893,7 @@ let racers = [];
 let running = false, paused = false, finished = false;
 let elapsed = 0;
 let countdownUntil = 0;
+let lastCount = 0;   // pra voz não repetir o mesmo número a cada frame
 let steer = 0;
 let turboUntil = 0, turboReady = 0;
 let coinsGot = 0;
@@ -788,6 +955,9 @@ function startRace() {
   // camera já posicionada antes do primeiro frame, senão dá um pulo feio
   updateCamera(1);
 
+  SND.unlock();
+  SND.stopMusic();
+  lastCount = 0;
   countdownUntil = performance.now() + 3200;
   $('countdown').classList.remove('hidden');
   lastFrame = performance.now();
@@ -888,6 +1058,7 @@ function step(dt) {
         r.u = 0.9999;
       } else if (r.isPlayer) {
         showToast('Volta ' + r.lap + ' de ' + LAPS);
+        SND.say(r.lap === LAPS ? 'Última volta!' : 'Volta ' + r.lap, true);
       }
     }
   });
@@ -920,6 +1091,11 @@ function step(dt) {
     if (Math.abs(du * curveLen) < 4 && Math.abs(c.lateral - me.lateral) < 3.6) {
       c.taken = true;
       coinsGot += 1;
+      SND.coin();
+      // a voz só canta as dezenas: de 1 em 1 viraria tagarelice em cima do jogo
+      if (coinsGot % 10 === 0) {
+        SND.say((DEZENAS[coinsGot] || coinsGot) + ' moedas!', true);
+      }
     }
   });
 
@@ -981,12 +1157,20 @@ function loop(now) {
     if (left > 0) {
       const n = Math.ceil(left / 1000);
       $('countdown').textContent = n > 3 ? '3' : (n === 0 ? 'JÁ!' : String(n));
+      if (n <= 3 && n !== lastCount) {
+        lastCount = n;
+        SND.beep(false);
+        SND.say(n === 3 ? 'três' : n === 2 ? 'dois' : 'um', true);
+      }
       updateCamera(1 - Math.exp(-5 * dt));
       renderer.render(scene, camera);
       return;
     }
     countdownUntil = 0;
     $('countdown').textContent = 'JÁ!';
+    SND.beep(true);
+    SND.say('Já! Vai, ' + racers[0].name + '!', true);
+    SND.startMusic();
     setTimeout(() => $('countdown').classList.add('hidden'), 550);
   }
 
@@ -1051,6 +1235,11 @@ function endRace() {
 
   saveRecord(me.name, me.finishedAt, me.bestLap || me.finishedAt, won);
 
+  SND.stopMusic();
+  const ORD = { 1: 'primeiro', 2: 'segundo', 3: 'terceiro', 4: 'quarto' };
+  SND.say((won ? 'Você ganhou! ' : 'Chegou em ' + (ORD[place] || place + 'º') + ' lugar. ') +
+          'Pegou ' + coinsGot + ' moedas.', true);
+
   const medal = place === 1 ? '&#127942;' : place === 2 ? '&#129352;' : place === 3 ? '&#129353;' : '&#127937;';
   const titulo = won ? 'Você ganhou!' : place === 2 ? 'Quase!' : place === 3 ? 'Pódio!' : 'Chegou!';
 
@@ -1074,6 +1263,8 @@ function endRace() {
 
 function toMenu() {
   running = false; paused = false;
+  SND.stopMusic();
+  if (window.speechSynthesis) speechSynthesis.cancel();
   $('overlay').classList.add('hidden');
   $('race').style.display = 'none';
   $('menu').style.display = 'block';
@@ -1086,6 +1277,7 @@ function toMenu() {
 function pause() {
   if (!running || paused || finished) return;
   paused = true;
+  SND.pauseMusic();
   const at = performance.now();
   $('overlay').innerHTML =
     '<div class="card">' +
@@ -1102,6 +1294,7 @@ function pause() {
     if (countdownUntil > 0) countdownUntil += paus;
     turboUntil += paus; turboReady += paus;
     paused = false;
+    SND.resumeMusic();
     $('overlay').classList.add('hidden');
   };
   $('ov-restart').onclick = () => { camInit = false; startRace(); };
@@ -1129,6 +1322,7 @@ function fireTurbo() {
   turboUntil = now + TURBO_MS;
   turboReady = now + TURBO_COOL;
   showToast('Turbo!');
+  SND.beep(true);
 }
 $('btn-turbo').onclick = (e) => { e.preventDefault(); fireTurbo(); };
 
@@ -1143,7 +1337,15 @@ document.addEventListener('keyup', (e) => {
   if ((e.key === 'ArrowRight' || e.key === 'd') && steer > 0) steer = 0;
 });
 
-$('btn-start').onclick = () => { camInit = false; startRace(); };
+$('btn-start').onclick = () => { camInit = false; SND.unlock(); startRace(); };
+
+function drawSom() { $('btn-som').textContent = 'Som: ' + (SND.isOn() ? 'ligado' : 'desligado'); }
+$('btn-som').onclick = () => {
+  const nowOn = SND.toggle();
+  drawSom();
+  if (nowOn) { SND.unlock(); SND.say('Som ligado', true); }
+};
+drawSom();
 
 /* =========================================================================
    Resize
